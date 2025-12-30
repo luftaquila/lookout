@@ -24,13 +24,23 @@ def fetch_image_from_url(url: str, timeout: int = 10) -> np.ndarray:
     return img
 
 
+def enhance_contrast_bgr(img_bgr):
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l2 = clahe.apply(l)
+    lab2 = cv2.merge([l2, a, b])
+    return cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
+
+
 def count_vehicles(
     img_bgr: np.ndarray,
     model: YOLO,
     conf: float = 0.25,
     iou: float = 0.45,
+    contrast: bool = False,
 ) -> tuple[int, dict]:
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    img_rgb = cv2.cvtColor(enhance_contrast_bgr(img_bgr) if contrast else img_bgr, cv2.COLOR_BGR2RGB)
 
     results = model.predict(img_rgb, conf=conf, iou=iou, verbose=False)
     if not results:
@@ -60,9 +70,11 @@ def draw_detections(
     model: YOLO,
     conf: float = 0.25,
     iou: float = 0.45,
+    contrast: bool = False,
 ) -> np.ndarray:
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    img_rgb = cv2.cvtColor(enhance_contrast_bgr(img_bgr) if contrast else img_bgr, cv2.COLOR_BGR2RGB)
     results = model.predict(img_rgb, conf=conf, iou=iou, verbose=False)
+
     if not results:
         return img_bgr
 
@@ -78,6 +90,7 @@ def main():
     parser.add_argument("--iou", type=float, default=0.45, help="NMS IoU threshold (기본: 0.45)")
     parser.add_argument("--timeout", type=int, default=10, help="URL 요청 타임아웃(초)")
     parser.add_argument("--save-vis", default=None, help="탐지 시각화 이미지를 저장할 경로(예: out.jpg)")
+    parser.add_argument("--contrast", default=None, help="컨트라스트 향상 이미지 사용")
     args = parser.parse_args()
 
     try:
@@ -92,7 +105,7 @@ def main():
         print(f"[ERROR] YOLO 모델 로드 실패: {e}", file=sys.stderr)
         sys.exit(1)
 
-    total, counts = count_vehicles(img, model, conf=args.conf, iou=args.iou)
+    total, counts = count_vehicles(img, model, conf=args.conf, iou=args.iou, contrast=args.contrast)
 
     print(f"총 차량 수: {total}")
     print("클래스별:")
@@ -100,7 +113,7 @@ def main():
         print(f"  {k}: {counts[k]}")
 
     if args.save_vis:
-        vis = draw_detections(img, model, conf=args.conf, iou=args.iou)
+        vis = draw_detections(img, model, conf=args.conf, iou=args.iou, contrast=args.contrast)
         ok = cv2.imwrite(args.save_vis, vis)
         if ok:
             print(f"시각화 저장: {args.save_vis}")

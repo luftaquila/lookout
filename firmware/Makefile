@@ -15,7 +15,7 @@ build:
 	@$(IDF_ENV) idf.py build $(IDF_FLAGS)
 
 flash: build
-	@$(IDF_ENV) idf.py -b 921600 flash
+	@$(IDF_ENV) idf.py flash
 
 run: flash
 	@$(IDF_ENV) idf.py monitor

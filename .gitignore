@@ -2,6 +2,9 @@
 build/
 *.old
 
+.env
+managed_components/
+
 # Created by https://www.toptal.com/developers/gitignore/api/c,cmake,vim,kicad,windows,linux,macos
 # Edit at https://www.toptal.com/developers/gitignore?templates=c,cmake,vim,kicad,windows,linux,macos
 

@@ -49,32 +49,47 @@ static esp_err_t update_latest_capture(void) {
   camera_fb_t *fb = NULL;
 
   xSemaphoreTake(s_cam_mux, portMAX_DELAY);
+
   sensor_t *s = esp_camera_sensor_get();
+
   if (s) {
-    s->set_framesize(s, FRAMESIZE_UXGA);
+    s->set_framesize(s, FRAMESIZE_QXGA);
   }
+
   fb = esp_camera_fb_get();
+  if (fb) {
+    esp_camera_fb_return(fb);
+    fb = NULL;
+  }
+
+  for (int i = 0; i < 3; i++) {
+    fb = esp_camera_fb_get();
+
+    if (!fb) {
+      break;
+    }
+
+    if (fb->format == PIXFORMAT_JPEG &&
+        fb->len >= 2 && fb->buf[0] == 0xFF && fb->buf[1] == 0xD8 &&
+        fb->width == 2048 && fb->height == 1536) {
+      break;
+    }
+
+    esp_camera_fb_return(fb);
+    fb = NULL;
+  }
+
   if (s) {
     s->set_framesize(s, FRAMESIZE_SXGA);
   }
+
   xSemaphoreGive(s_cam_mux);
 
   if (!fb) {
     return ESP_FAIL;
   }
 
-  if (fb->format != PIXFORMAT_JPEG) {
-    esp_camera_fb_return(fb);
-    return ESP_FAIL;
-  }
-
-  if (fb->len < 2 || fb->buf[0] != 0xFF || fb->buf[1] != 0xD8) {
-    esp_camera_fb_return(fb);
-    return ESP_FAIL;
-  }
-
   uint8_t *new_buf = (uint8_t *)malloc(fb->len);
-
   if (!new_buf) {
     esp_camera_fb_return(fb);
     return ESP_ERR_NO_MEM;
@@ -166,10 +181,6 @@ static void stream_task(void *arg) {
     camera_fb_t *fb = NULL;
 
     xSemaphoreTake(s_cam_mux, portMAX_DELAY);
-    sensor_t *s = esp_camera_sensor_get();
-    if (s) {
-      s->set_framesize(s, FRAMESIZE_SXGA);
-    }
     fb = esp_camera_fb_get();
     xSemaphoreGive(s_cam_mux);
 
@@ -183,18 +194,21 @@ static void stream_task(void *arg) {
     }
 
     res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
+
     if (res != ESP_OK) {
       esp_camera_fb_return(fb);
       break;
     }
 
     int hlen = snprintf(hdr, sizeof(hdr), STREAM_PART, fb->len);
+
     if (hlen <= 0 || hlen >= (int)sizeof(hdr)) {
       esp_camera_fb_return(fb);
       break;
     }
 
     res = httpd_resp_send_chunk(req, hdr, hlen);
+
     if (res != ESP_OK) {
       esp_camera_fb_return(fb);
       break;
@@ -220,6 +234,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   httpd_req_t *async_req = NULL;
 
   esp_err_t r = httpd_req_async_handler_begin(req, &async_req);
+
   if (r != ESP_OK) {
     return r;
   }
@@ -227,7 +242,11 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   BaseType_t ok = xTaskCreatePinnedToCore(stream_task, "stream", 8192, (void *)async_req, 5, NULL, 1);
   if (ok != pdPASS) {
     httpd_req_async_handler_complete(async_req);
-    if (s_httpd) httpd_queue_work(s_httpd, httpd_wake, NULL);
+
+    if (s_httpd) {
+      httpd_queue_work(s_httpd, httpd_wake, NULL);
+    }
+
     return ESP_FAIL;
   }
 
@@ -240,6 +259,7 @@ static httpd_handle_t start_webserver(void) {
   config.stack_size = 8192;
 
   httpd_handle_t server = NULL;
+
   if (httpd_start(&server, &config) != ESP_OK) {
     return NULL;
   }
@@ -300,8 +320,10 @@ static esp_err_t init_camera(void) {
 
   esp_err_t err = esp_camera_init(&c);
 
-  if (err != ESP_OK)
+  if (err != ESP_OK) {
     ESP_LOGE("CAM", "esp_camera_init failed: 0x%x", err);
+  }
+
   return err;
 }
 

@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdlib.h>
 
 #include "esp_camera.h"
 #include "esp_event.h"
@@ -7,6 +8,10 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #define PWDN_GPIO_NUM 32
 #define RESET_GPIO_NUM -1
@@ -28,55 +33,205 @@
 
 static esp_ip4_addr_t ipaddr;
 
-static esp_err_t stream_handler(httpd_req_t *req) {
+static httpd_handle_t s_httpd = NULL;
+
+static uint8_t *s_latest_jpg = NULL;
+static size_t s_latest_jpg_len = 0;
+
+static SemaphoreHandle_t s_latest_mux = NULL;
+static SemaphoreHandle_t s_cam_mux = NULL;
+
+static void httpd_wake(void *arg) {
+}
+
+static esp_err_t update_latest_capture(void) {
+  esp_err_t ret = ESP_FAIL;
+  camera_fb_t *fb = NULL;
+
+  xSemaphoreTake(s_cam_mux, portMAX_DELAY);
+  sensor_t *s = esp_camera_sensor_get();
+  if (s) {
+    s->set_framesize(s, FRAMESIZE_UXGA);
+  }
+  fb = esp_camera_fb_get();
+  if (s) {
+    s->set_framesize(s, FRAMESIZE_SXGA);
+  }
+  xSemaphoreGive(s_cam_mux);
+
+  if (!fb) {
+    return ESP_FAIL;
+  }
+
+  if (fb->format != PIXFORMAT_JPEG) {
+    esp_camera_fb_return(fb);
+    return ESP_FAIL;
+  }
+
+  if (fb->len < 2 || fb->buf[0] != 0xFF || fb->buf[1] != 0xD8) {
+    esp_camera_fb_return(fb);
+    return ESP_FAIL;
+  }
+
+  uint8_t *new_buf = (uint8_t *)malloc(fb->len);
+
+  if (!new_buf) {
+    esp_camera_fb_return(fb);
+    return ESP_ERR_NO_MEM;
+  }
+
+  memcpy(new_buf, fb->buf, fb->len);
+  size_t new_len = fb->len;
+
+  esp_camera_fb_return(fb);
+
+  xSemaphoreTake(s_latest_mux, portMAX_DELAY);
+  uint8_t *old = s_latest_jpg;
+  s_latest_jpg = new_buf;
+  s_latest_jpg_len = new_len;
+  xSemaphoreGive(s_latest_mux);
+
+  if (old) {
+    free(old);
+  }
+
+  ret = ESP_OK;
+  return ret;
+}
+
+static void capture_refresh_task(void *arg) {
+  const TickType_t period = pdMS_TO_TICKS(5 * 60 * 1000);
+
+  for (int i = 0; i < 10; i++) {
+    if (update_latest_capture() == ESP_OK) {
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+
+  while (1) {
+    update_latest_capture();
+    vTaskDelay(period);
+  }
+}
+
+static esp_err_t capture_handler(httpd_req_t *req) {
+  httpd_resp_set_type(req, "image/jpeg");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  httpd_resp_set_hdr(req, "Pragma", "no-cache");
+
+  xSemaphoreTake(s_latest_mux, portMAX_DELAY);
+  size_t len = s_latest_jpg_len;
+
+  if (!s_latest_jpg || len == 0) {
+    xSemaphoreGive(s_latest_mux);
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    return httpd_resp_sendstr(req, "No capture yet");
+  }
+
+  uint8_t *tmp = (uint8_t *)malloc(len);
+  if (!tmp) {
+    xSemaphoreGive(s_latest_mux);
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    return httpd_resp_sendstr(req, "No mem");
+  }
+
+  memcpy(tmp, s_latest_jpg, len);
+  xSemaphoreGive(s_latest_mux);
+
+  esp_err_t r = httpd_resp_send(req, (const char *)tmp, len);
+  free(tmp);
+  return r;
+}
+
+static void stream_task(void *arg) {
 #define STREAM_PART_BOUNDARY "123456789000000000000987654321"
   static const char *STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" STREAM_PART_BOUNDARY;
   static const char *STREAM_BOUNDARY = "\r\n--" STREAM_PART_BOUNDARY "\r\n";
   static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %zu\r\n\r\n";
 
-  esp_err_t res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
+  httpd_req_t *req = (httpd_req_t *)arg;
 
+  esp_err_t res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
   if (res != ESP_OK) {
-    return res;
+    httpd_req_async_handler_complete(req);
+    if (s_httpd) httpd_queue_work(s_httpd, httpd_wake, NULL);
+    vTaskDelete(NULL);
+    return;
   }
 
   char hdr[64];
 
   while (1) {
-    camera_fb_t *fb = esp_camera_fb_get();
+    camera_fb_t *fb = NULL;
+
+    xSemaphoreTake(s_cam_mux, portMAX_DELAY);
+    sensor_t *s = esp_camera_sensor_get();
+    if (s) {
+      s->set_framesize(s, FRAMESIZE_SXGA);
+    }
+    fb = esp_camera_fb_get();
+    xSemaphoreGive(s_cam_mux);
 
     if (!fb) {
-      return ESP_FAIL;
+      break;
+    }
+
+    if (fb->format != PIXFORMAT_JPEG || fb->len < 2 || fb->buf[0] != 0xFF || fb->buf[1] != 0xD8) {
+      esp_camera_fb_return(fb);
+      continue;
     }
 
     res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
-
     if (res != ESP_OK) {
       esp_camera_fb_return(fb);
-      return res;
+      break;
     }
 
     int hlen = snprintf(hdr, sizeof(hdr), STREAM_PART, fb->len);
-
     if (hlen <= 0 || hlen >= (int)sizeof(hdr)) {
       esp_camera_fb_return(fb);
-      return ESP_FAIL;
+      break;
     }
 
     res = httpd_resp_send_chunk(req, hdr, hlen);
-
     if (res != ESP_OK) {
       esp_camera_fb_return(fb);
-      return res;
+      break;
     }
 
     res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
     esp_camera_fb_return(fb);
 
     if (res != ESP_OK) {
-      return res;
+      break;
     }
+
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
+
+  httpd_resp_send_chunk(req, NULL, 0);
+  httpd_req_async_handler_complete(req);
+  if (s_httpd) httpd_queue_work(s_httpd, httpd_wake, NULL);
+  vTaskDelete(NULL);
+}
+
+static esp_err_t stream_handler(httpd_req_t *req) {
+  httpd_req_t *async_req = NULL;
+
+  esp_err_t r = httpd_req_async_handler_begin(req, &async_req);
+  if (r != ESP_OK) {
+    return r;
+  }
+
+  BaseType_t ok = xTaskCreatePinnedToCore(stream_task, "stream", 8192, (void *)async_req, 5, NULL, 1);
+  if (ok != pdPASS) {
+    httpd_req_async_handler_complete(async_req);
+    if (s_httpd) httpd_queue_work(s_httpd, httpd_wake, NULL);
+    return ESP_FAIL;
+  }
+
+  return ESP_OK;
 }
 
 static httpd_handle_t start_webserver(void) {
@@ -89,15 +244,26 @@ static httpd_handle_t start_webserver(void) {
     return NULL;
   }
 
-  httpd_uri_t uri = {
+  s_httpd = server;
+
+  httpd_uri_t stream_uri = {
       .uri = "/stream",
       .method = HTTP_GET,
       .handler = stream_handler,
       .user_ctx = NULL,
   };
-  httpd_register_uri_handler(server, &uri);
+  httpd_register_uri_handler(server, &stream_uri);
 
-  ESP_LOGI("HTTP", "server: http://" IPSTR "/stream", IP2STR(&ipaddr));
+  httpd_uri_t cap_uri = {
+      .uri = "/capture",
+      .method = HTTP_GET,
+      .handler = capture_handler,
+      .user_ctx = NULL,
+  };
+  httpd_register_uri_handler(server, &cap_uri);
+
+  ESP_LOGI("HTTP", "stream:  http://" IPSTR "/stream", IP2STR(&ipaddr));
+  ESP_LOGI("HTTP", "capture: http://" IPSTR "/capture", IP2STR(&ipaddr));
   return server;
 }
 
@@ -180,7 +346,18 @@ static esp_err_t wifi_connect_blocking(void) {
 void app_main(void) {
   ESP_ERROR_CHECK(nvs_flash_init());
   ESP_ERROR_CHECK(wifi_connect_blocking());
+
+  s_latest_mux = xSemaphoreCreateMutex();
+  s_cam_mux = xSemaphoreCreateMutex();
+
+  if (!s_latest_mux || !s_cam_mux) {
+    ESP_LOGE("APP", "Failed to create mutex");
+    return;
+  }
+
   ESP_ERROR_CHECK(init_camera());
+
+  xTaskCreatePinnedToCore(capture_refresh_task, "cap_refresh", 4096, NULL, 5, NULL, 1);
 
   if (!start_webserver()) {
     ESP_LOGE("APP", "Failed to start web server");

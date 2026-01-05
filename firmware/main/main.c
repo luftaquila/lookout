@@ -115,7 +115,7 @@ static esp_err_t update_latest_capture(void) {
 }
 
 static void capture_refresh_task(void *arg) {
-  const TickType_t period = pdMS_TO_TICKS(5 * 60 * 1000);
+  const TickType_t period = pdMS_TO_TICKS(60 * 1000);
 
   for (int i = 0; i < 10; i++) {
     if (update_latest_capture() == ESP_OK) {

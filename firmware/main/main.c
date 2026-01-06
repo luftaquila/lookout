@@ -9,10 +9,6 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/semphr.h"
-
 #define PWDN_GPIO_NUM 32
 #define RESET_GPIO_NUM -1
 #define XCLK_GPIO_NUM 0
@@ -51,12 +47,10 @@ static esp_err_t update_latest_capture(void) {
   xSemaphoreTake(s_cam_mux, portMAX_DELAY);
 
   sensor_t *s = esp_camera_sensor_get();
-
-  if (s) {
-    s->set_framesize(s, FRAMESIZE_QXGA);
-  }
+  s->set_framesize(s, FRAMESIZE_QXGA);
 
   fb = esp_camera_fb_get();
+
   if (fb) {
     esp_camera_fb_return(fb);
     fb = NULL;
@@ -79,9 +73,7 @@ static esp_err_t update_latest_capture(void) {
     fb = NULL;
   }
 
-  if (s) {
-    s->set_framesize(s, FRAMESIZE_SXGA);
-  }
+  s->set_framesize(s, FRAMESIZE_SXGA);
 
   xSemaphoreGive(s_cam_mux);
 
@@ -90,6 +82,7 @@ static esp_err_t update_latest_capture(void) {
   }
 
   uint8_t *new_buf = (uint8_t *)malloc(fb->len);
+
   if (!new_buf) {
     esp_camera_fb_return(fb);
     return ESP_ERR_NO_MEM;
@@ -319,6 +312,8 @@ static esp_err_t init_camera(void) {
   };
 
   esp_err_t err = esp_camera_init(&c);
+  sensor_t *s = esp_camera_sensor_get();
+  s->set_vflip(s, 1);
 
   if (err != ESP_OK) {
     ESP_LOGE("CAM", "esp_camera_init failed: 0x%x", err);

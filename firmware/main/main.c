@@ -1,4 +1,3 @@
-#include <string.h>
 #include <stdlib.h>
 
 #include "esp_camera.h"
@@ -9,39 +8,19 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 
-#define PWDN_GPIO_NUM 32
-#define RESET_GPIO_NUM -1
-#define XCLK_GPIO_NUM 0
-#define SIOD_GPIO_NUM 26
-#define SIOC_GPIO_NUM 27
-
-#define Y9_GPIO_NUM 35
-#define Y8_GPIO_NUM 34
-#define Y7_GPIO_NUM 39
-#define Y6_GPIO_NUM 36
-#define Y5_GPIO_NUM 21
-#define Y4_GPIO_NUM 19
-#define Y3_GPIO_NUM 18
-#define Y2_GPIO_NUM 5
-#define VSYNC_GPIO_NUM 25
-#define HREF_GPIO_NUM 23
-#define PCLK_GPIO_NUM 22
-
 static esp_ip4_addr_t ipaddr;
-
 static httpd_handle_t s_httpd = NULL;
 
-static uint8_t *s_latest_jpg = NULL;
+static uint8_t *s_latest_jpg   = NULL;
 static size_t s_latest_jpg_len = 0;
 
 static SemaphoreHandle_t s_latest_mux = NULL;
-static SemaphoreHandle_t s_cam_mux = NULL;
+static SemaphoreHandle_t s_cam_mux    = NULL;
 
-static void httpd_wake(void *arg) {
-}
+static void httpd_wake(void *arg) {}
 
 static esp_err_t update_latest_capture(void) {
-  esp_err_t ret = ESP_FAIL;
+  esp_err_t ret   = ESP_FAIL;
   camera_fb_t *fb = NULL;
 
   xSemaphoreTake(s_cam_mux, portMAX_DELAY);
@@ -59,15 +38,14 @@ static esp_err_t update_latest_capture(void) {
   for (int i = 0; i < 3; i++) {
     fb = esp_camera_fb_get();
 
-    if (!fb) {
+    if (!fb || (fb->width == 2048 && fb->height == 1536)) {
       break;
     }
 
-    if (fb->format == PIXFORMAT_JPEG &&
-        fb->len >= 2 && fb->buf[0] == 0xFF && fb->buf[1] == 0xD8 &&
-        fb->width == 2048 && fb->height == 1536) {
+    if (fb->format == PIXFORMAT_JPEG && fb->len >= 2 && fb->buf[0] == 0xFF && fb->buf[1] == 0xD8) {
       break;
     }
+
 
     esp_camera_fb_return(fb);
     fb = NULL;
@@ -94,8 +72,8 @@ static esp_err_t update_latest_capture(void) {
   esp_camera_fb_return(fb);
 
   xSemaphoreTake(s_latest_mux, portMAX_DELAY);
-  uint8_t *old = s_latest_jpg;
-  s_latest_jpg = new_buf;
+  uint8_t *old     = s_latest_jpg;
+  s_latest_jpg     = new_buf;
   s_latest_jpg_len = new_len;
   xSemaphoreGive(s_latest_mux);
 
@@ -114,6 +92,7 @@ static void capture_refresh_task(void *arg) {
     if (update_latest_capture() == ESP_OK) {
       break;
     }
+
     vTaskDelay(pdMS_TO_TICKS(200));
   }
 
@@ -138,6 +117,7 @@ static esp_err_t capture_handler(httpd_req_t *req) {
   }
 
   uint8_t *tmp = (uint8_t *)malloc(len);
+
   if (!tmp) {
     xSemaphoreGive(s_latest_mux);
     httpd_resp_set_status(req, "503 Service Unavailable");
@@ -155,15 +135,19 @@ static esp_err_t capture_handler(httpd_req_t *req) {
 static void stream_task(void *arg) {
 #define STREAM_PART_BOUNDARY "123456789000000000000987654321"
   static const char *STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" STREAM_PART_BOUNDARY;
-  static const char *STREAM_BOUNDARY = "\r\n--" STREAM_PART_BOUNDARY "\r\n";
-  static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %zu\r\n\r\n";
+  static const char *STREAM_BOUNDARY     = "\r\n--" STREAM_PART_BOUNDARY "\r\n";
+  static const char *STREAM_PART         = "Content-Type: image/jpeg\r\nContent-Length: %zu\r\n\r\n";
 
   httpd_req_t *req = (httpd_req_t *)arg;
+  esp_err_t res    = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
 
-  esp_err_t res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
   if (res != ESP_OK) {
     httpd_req_async_handler_complete(req);
-    if (s_httpd) httpd_queue_work(s_httpd, httpd_wake, NULL);
+
+    if (s_httpd) {
+      httpd_queue_work(s_httpd, httpd_wake, NULL);
+    }
+
     vTaskDelete(NULL);
     return;
   }
@@ -219,14 +203,17 @@ static void stream_task(void *arg) {
 
   httpd_resp_send_chunk(req, NULL, 0);
   httpd_req_async_handler_complete(req);
-  if (s_httpd) httpd_queue_work(s_httpd, httpd_wake, NULL);
+
+  if (s_httpd) {
+    httpd_queue_work(s_httpd, httpd_wake, NULL);
+  }
+
   vTaskDelete(NULL);
 }
 
 static esp_err_t stream_handler(httpd_req_t *req) {
   httpd_req_t *async_req = NULL;
-
-  esp_err_t r = httpd_req_async_handler_begin(req, &async_req);
+  esp_err_t r            = httpd_req_async_handler_begin(req, &async_req);
 
   if (r != ESP_OK) {
     return r;
@@ -248,8 +235,8 @@ static esp_err_t stream_handler(httpd_req_t *req) {
 
 static httpd_handle_t start_webserver(void) {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.server_port = 80;
-  config.stack_size = 8192;
+  config.server_port    = 80;
+  config.stack_size     = 8192;
 
   httpd_handle_t server = NULL;
 
@@ -260,18 +247,18 @@ static httpd_handle_t start_webserver(void) {
   s_httpd = server;
 
   httpd_uri_t stream_uri = {
-      .uri = "/stream",
-      .method = HTTP_GET,
-      .handler = stream_handler,
-      .user_ctx = NULL,
+    .uri      = "/stream",
+    .method   = HTTP_GET,
+    .handler  = stream_handler,
+    .user_ctx = NULL,
   };
   httpd_register_uri_handler(server, &stream_uri);
 
   httpd_uri_t cap_uri = {
-      .uri = "/capture",
-      .method = HTTP_GET,
-      .handler = capture_handler,
-      .user_ctx = NULL,
+    .uri      = "/capture",
+    .method   = HTTP_GET,
+    .handler  = capture_handler,
+    .user_ctx = NULL,
   };
   httpd_register_uri_handler(server, &cap_uri);
 
@@ -282,37 +269,37 @@ static httpd_handle_t start_webserver(void) {
 
 static esp_err_t init_camera(void) {
   camera_config_t c = {
-      .pin_pwdn = PWDN_GPIO_NUM,
-      .pin_reset = RESET_GPIO_NUM,
-      .pin_xclk = XCLK_GPIO_NUM,
-      .pin_sscb_sda = SIOD_GPIO_NUM,
-      .pin_sscb_scl = SIOC_GPIO_NUM,
+    .pin_pwdn     = 32,
+    .pin_reset    = -1,
+    .pin_xclk     = 0,
+    .pin_sccb_sda = 26,
+    .pin_sccb_scl = 27,
 
-      .pin_d7 = Y9_GPIO_NUM,
-      .pin_d6 = Y8_GPIO_NUM,
-      .pin_d5 = Y7_GPIO_NUM,
-      .pin_d4 = Y6_GPIO_NUM,
-      .pin_d3 = Y5_GPIO_NUM,
-      .pin_d2 = Y4_GPIO_NUM,
-      .pin_d1 = Y3_GPIO_NUM,
-      .pin_d0 = Y2_GPIO_NUM,
-      .pin_vsync = VSYNC_GPIO_NUM,
-      .pin_href = HREF_GPIO_NUM,
-      .pin_pclk = PCLK_GPIO_NUM,
+    .pin_d7    = 35,
+    .pin_d6    = 34,
+    .pin_d5    = 39,
+    .pin_d4    = 36,
+    .pin_d3    = 21,
+    .pin_d2    = 19,
+    .pin_d1    = 18,
+    .pin_d0    = 5,
+    .pin_vsync = 25,
+    .pin_href  = 23,
+    .pin_pclk  = 22,
 
-      .xclk_freq_hz = 20000000,
-      .ledc_timer = LEDC_TIMER_0,
-      .ledc_channel = LEDC_CHANNEL_0,
+    .xclk_freq_hz = 20000000,
+    .ledc_timer   = LEDC_TIMER_0,
+    .ledc_channel = LEDC_CHANNEL_0,
 
-      .pixel_format = PIXFORMAT_JPEG,
-      .frame_size = FRAMESIZE_SXGA,
-      .jpeg_quality = 12,
-      .fb_count = 2,
-      .grab_mode = CAMERA_GRAB_LATEST,
+    .pixel_format = PIXFORMAT_JPEG,
+    .frame_size   = FRAMESIZE_SXGA,
+    .jpeg_quality = 12,
+    .fb_count     = 2,
+    .grab_mode    = CAMERA_GRAB_LATEST,
   };
 
   esp_err_t err = esp_camera_init(&c);
-  sensor_t *s = esp_camera_sensor_get();
+  sensor_t *s   = esp_camera_sensor_get();
   s->set_vflip(s, 1);
 
   if (err != ESP_OK) {
@@ -326,8 +313,8 @@ static bool s_got_ip = false;
 
 static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data) {
   ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
-  ipaddr = e->ip_info.ip;
-  s_got_ip = true;
+  ipaddr               = e->ip_info.ip;
+  s_got_ip             = true;
   ESP_LOGI("Wi-Fi", "Got IP: " IPSTR, IP2STR(&ipaddr));
 }
 
@@ -341,7 +328,7 @@ static esp_err_t wifi_connect_blocking(void) {
 
   ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_got_ip, NULL));
 
-  wifi_config_t wc = {0};
+  wifi_config_t wc = { 0 };
   strncpy((char *)wc.sta.ssid, WIFI_SSID, sizeof(wc.sta.ssid));
   strncpy((char *)wc.sta.password, WIFI_PASS, sizeof(wc.sta.password));
   wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
@@ -365,7 +352,7 @@ void app_main(void) {
   ESP_ERROR_CHECK(wifi_connect_blocking());
 
   s_latest_mux = xSemaphoreCreateMutex();
-  s_cam_mux = xSemaphoreCreateMutex();
+  s_cam_mux    = xSemaphoreCreateMutex();
 
   if (!s_latest_mux || !s_cam_mux) {
     ESP_LOGE("APP", "Failed to create mutex");

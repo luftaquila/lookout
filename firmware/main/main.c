@@ -6,7 +6,11 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_sntp.h"
 #include "nvs_flash.h"
+
+#define START_HOUR 7
+#define END_HOUR 19
 
 static esp_ip4_addr_t ipaddr;
 static httpd_handle_t s_httpd = NULL;
@@ -16,6 +20,19 @@ static size_t s_latest_jpg_len = 0;
 
 static SemaphoreHandle_t s_latest_mux = NULL;
 static SemaphoreHandle_t s_cam_mux    = NULL;
+
+static bool is_working_hours(void) {
+  time_t now;
+  struct tm timeinfo;
+  time(&now);
+  localtime_r(&now, &timeinfo);
+
+  if (timeinfo.tm_year < (2000 - 1900) || (timeinfo.tm_hour >= START_HOUR && timeinfo.tm_hour < END_HOUR)) {
+    return true;
+  }
+
+  return false;
+}
 
 static void httpd_wake(void *arg) {}
 
@@ -45,7 +62,6 @@ static esp_err_t update_latest_capture(void) {
     if (fb->format == PIXFORMAT_JPEG && fb->len >= 2 && fb->buf[0] == 0xFF && fb->buf[1] == 0xD8) {
       break;
     }
-
 
     esp_camera_fb_return(fb);
     fb = NULL;
@@ -97,12 +113,22 @@ static void capture_refresh_task(void *arg) {
   }
 
   while (1) {
-    update_latest_capture();
-    vTaskDelay(period);
+    if (is_working_hours()) {
+      update_latest_capture();
+      vTaskDelay(period);
+    } else {
+      ESP_LOGI("APP", "Sleeping outside working hours...");
+      vTaskDelay(pdMS_TO_TICKS(60 * 1000));
+    }
   }
 }
 
 static esp_err_t capture_handler(httpd_req_t *req) {
+  if (!is_working_hours()) {
+    httpd_resp_set_status(req, "403 Forbidden");
+    return httpd_resp_sendstr(req, "Camera is sleeping (07:00 - 19:00 only)");
+  }
+
   httpd_resp_set_type(req, "image/jpeg");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   httpd_resp_set_hdr(req, "Pragma", "no-cache");
@@ -139,7 +165,16 @@ static void stream_task(void *arg) {
   static const char *STREAM_PART         = "Content-Type: image/jpeg\r\nContent-Length: %zu\r\n\r\n";
 
   httpd_req_t *req = (httpd_req_t *)arg;
-  esp_err_t res    = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
+
+  if (!is_working_hours()) {
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_sendstr(req, "Camera is sleeping (07:00 - 19:00 only)");
+    httpd_req_async_handler_complete(req);
+    vTaskDelete(NULL);
+    return;
+  }
+
+  esp_err_t res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
 
   if (res != ESP_OK) {
     httpd_req_async_handler_complete(req);
@@ -155,6 +190,10 @@ static void stream_task(void *arg) {
   char hdr[64];
 
   while (1) {
+    if (!is_working_hours()) {
+      break;
+    }
+
     camera_fb_t *fb = NULL;
 
     xSemaphoreTake(s_cam_mux, portMAX_DELAY);
@@ -233,6 +272,30 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   return ESP_OK;
 }
 
+static esp_err_t index_handler(httpd_req_t *req) {
+  httpd_resp_set_type(req, "text/html");
+  const char *html =
+    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1' charset='UTF-8'>"
+    "<style>"
+    "body {height:100vh; margin:0; display:flex; flex-direction:column; align-items:center; justify-content:center;}"
+    ".container {text-align:center;font-family:Arial;}"
+    ".btns {display:flex; gap:15px; justify-content:center; margin-bottom:20px; }"
+    "a {padding:15px 25px; text-decoration:none; background:#007bff; color:white; border-radius:5px;}"
+    "a:hover {background:#0056b3;}"
+    ".info {color:#666; line-height:1.6; }"
+    "</style></head><body>"
+    "<div class='container'>"
+    "<h1 style='margin-bottom:2rem;'>RTst Parking Lot Camera</h1>"
+    "<div class='btns'><a href='/stream'>Live Stream</a><a href='/capture'>Capture</a></div><div class='info'>"
+    "<p><b>Working Time:</b> 07:00 ~ 19:00 KST</p>"
+    "<p>Stream: 1280x1024 | Capture: 2048x1536</p>"
+    "<p><i>* Capture image refreshes every 1 minute.</i></p>"
+    "</div></div>"
+    "</body></html>";
+
+  return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
+}
+
 static httpd_handle_t start_webserver(void) {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port    = 80;
@@ -245,6 +308,14 @@ static httpd_handle_t start_webserver(void) {
   }
 
   s_httpd = server;
+
+  httpd_uri_t index_uri = {
+    .uri      = "/",
+    .method   = HTTP_GET,
+    .handler  = index_handler,
+    .user_ctx = NULL,
+  };
+  httpd_register_uri_handler(server, &index_uri);
 
   httpd_uri_t stream_uri = {
     .uri      = "/stream",
@@ -347,9 +418,33 @@ static esp_err_t wifi_connect_blocking(void) {
   return ESP_OK;
 }
 
+static void init_sntp(void) {
+  ESP_LOGI("NTP", "Initializing SNTP");
+  esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+  esp_sntp_setservername(0, "pool.ntp.org");
+  esp_sntp_init();
+
+  setenv("TZ", "KST-9", 1);
+  tzset();
+
+  int retry             = 0;
+  const int retry_count = 15;
+  while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count) {
+    ESP_LOGI("NTP", "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
+  }
+
+  time_t now;
+  struct tm timeinfo;
+  time(&now);
+  localtime_r(&now, &timeinfo);
+  ESP_LOGI("NTP", "Current time: %s", asctime(&timeinfo));
+}
+
 void app_main(void) {
   ESP_ERROR_CHECK(nvs_flash_init());
   ESP_ERROR_CHECK(wifi_connect_blocking());
+  init_sntp();
 
   s_latest_mux = xSemaphoreCreateMutex();
   s_cam_mux    = xSemaphoreCreateMutex();

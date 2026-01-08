@@ -10,6 +10,7 @@
 #define START_HOUR 7
 #define END_HOUR 19
 #define BIT_WORKING_HOURS (1 << 0)
+#define BIT_CAPTURE_BUSY (1 << 1)
 
 static esp_ip4_addr_t ipaddr;
 static httpd_handle_t s_httpd = NULL;
@@ -59,73 +60,71 @@ static void time_keeper_task(void *arg) {
 static void httpd_wake(void *arg) {}
 
 static esp_err_t update_latest_capture(void) {
-  esp_err_t ret   = ESP_FAIL;
   camera_fb_t *fb = NULL;
 
+  xEventGroupSetBits(s_evt_group, BIT_CAPTURE_BUSY);
   xSemaphoreTake(s_cam_mux, portMAX_DELAY);
 
   sensor_t *s = esp_camera_sensor_get();
   s->set_framesize(s, FRAMESIZE_QXGA);
-  vTaskDelay(pdMS_TO_TICKS(100));
 
   for (int i = 0; i < 3; i++) {
     fb = esp_camera_fb_get();
+    if (fb) {
+      esp_camera_fb_return(fb);
+      fb = NULL;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+
+  for (int i = 0; i < 20; i++) {
+    fb = esp_camera_fb_get();
 
     if (!fb) {
+      vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
 
-    if (fb->width == 2048 && fb->height == 1536) {
-      break;
+    if (fb->width != 2048 || fb->height != 1536 || fb->len < 2 || fb->buf[0] != 0xFF || fb->buf[1] != 0xD8) {
+      esp_camera_fb_return(fb);
+      fb = NULL;
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
     }
 
-    esp_camera_fb_return(fb);
-    fb = NULL;
+    break;
   }
-
-  s->set_framesize(s, FRAMESIZE_SXGA);
-
-  xSemaphoreGive(s_cam_mux);
 
   if (!fb) {
     return ESP_FAIL;
   }
 
-  uint8_t *new_buf = (uint8_t *)malloc(fb->len);
+  xSemaphoreTake(s_latest_mux, portMAX_DELAY);
 
-  if (!new_buf) {
-    esp_camera_fb_return(fb);
-    return ESP_ERR_NO_MEM;
-  }
+  memcpy(s_latest_jpg, fb->buf, fb->len);
+  s_latest_jpg_len = fb->len;
 
-  memcpy(new_buf, fb->buf, fb->len);
-  size_t new_len = fb->len;
+  xSemaphoreGive(s_latest_mux);
 
   esp_camera_fb_return(fb);
 
-  xSemaphoreTake(s_latest_mux, portMAX_DELAY);
-  uint8_t *old     = s_latest_jpg;
-  s_latest_jpg     = new_buf;
-  s_latest_jpg_len = new_len;
-  xSemaphoreGive(s_latest_mux);
+  ESP_LOGI("CAM", "Capture Updated: %u bytes", s_latest_jpg_len);
 
-  if (old) {
-    free(old);
-  }
+  s->set_framesize(s, FRAMESIZE_SXGA);
 
-  ret = ESP_OK;
-  return ret;
+  xSemaphoreGive(s_cam_mux);
+  xEventGroupClearBits(s_evt_group, BIT_CAPTURE_BUSY);
+
+  return ESP_OK;
 }
 
 static void capture_refresh_task(void *arg) {
-  const TickType_t period = pdMS_TO_TICKS(60 * 1000);
-
   while (1) {
     EventBits_t bits = xEventGroupWaitBits(s_evt_group, BIT_WORKING_HOURS, pdFALSE, pdTRUE, portMAX_DELAY);
 
     if (bits & BIT_WORKING_HOURS) {
       update_latest_capture();
-      vTaskDelay(period);
+      vTaskDelay(pdMS_TO_TICKS(60 * 1000) );
     }
   }
 }
@@ -149,9 +148,28 @@ static esp_err_t capture_handler(httpd_req_t *req) {
     return httpd_resp_sendstr(req, "Initializing...");
   }
 
-  esp_err_t r = httpd_resp_send(req, (const char *)s_latest_jpg, s_latest_jpg_len);
+  const size_t chunk_size = 16 * 1024;
+  size_t remaining        = s_latest_jpg_len;
+  uint8_t *ptr            = s_latest_jpg;
+
+  while (remaining > 0) {
+    size_t to_send = (remaining < chunk_size) ? remaining : chunk_size;
+
+    esp_err_t res = httpd_resp_send_chunk(req, (const char *)ptr, to_send);
+
+    if (res != ESP_OK) {
+      xSemaphoreGive(s_latest_mux);
+      return res;
+    }
+
+    ptr += to_send;
+    remaining -= to_send;
+  }
+
+  httpd_resp_send_chunk(req, NULL, 0);
+
   xSemaphoreGive(s_latest_mux);
-  return r;
+  return ESP_OK;
 }
 
 static void stream_task(void *arg) {
@@ -190,14 +208,24 @@ static void stream_task(void *arg) {
       break;
     }
 
+    if (xEventGroupGetBits(s_evt_group) & BIT_CAPTURE_BUSY) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
     camera_fb_t *fb = NULL;
 
-    xSemaphoreTake(s_cam_mux, portMAX_DELAY);
-    fb = esp_camera_fb_get();
-    xSemaphoreGive(s_cam_mux);
+    if (xSemaphoreTake(s_cam_mux, portMAX_DELAY)) {
+      fb = esp_camera_fb_get();
+      xSemaphoreGive(s_cam_mux);
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
 
     if (!fb) {
-      break;
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
     }
 
     if (fb->format != PIXFORMAT_JPEG || fb->len < 2 || fb->buf[0] != 0xFF || fb->buf[1] != 0xD8) {
@@ -233,7 +261,7 @@ static void stream_task(void *arg) {
       break;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(1));
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 
   httpd_resp_send_chunk(req, NULL, 0);
@@ -254,7 +282,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     return r;
   }
 
-  BaseType_t ok = xTaskCreatePinnedToCore(stream_task, "stream", 8192, (void *)async_req, 5, NULL, 1);
+  BaseType_t ok = xTaskCreate(stream_task, "stream", 8192, (void *)async_req, 5, NULL);
   if (ok != pdPASS) {
     httpd_req_async_handler_complete(async_req);
 
@@ -354,7 +382,7 @@ static esp_err_t init_camera(void) {
     .pin_href  = 23,
     .pin_pclk  = 22,
 
-    .xclk_freq_hz = 20000000,
+    .xclk_freq_hz = 8000000,
     .ledc_timer   = LEDC_TIMER_0,
     .ledc_channel = LEDC_CHANNEL_0,
 
@@ -425,7 +453,8 @@ static void init_sntp(void) {
   tzset();
 
   int retry             = 0;
-  const int retry_count = 15;
+  const int retry_count = 5;
+
   while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count) {
     ESP_LOGI("NTP", "Waiting for system time to be set... (%d/%d)", retry, retry_count);
     vTaskDelay(2000 / portTICK_PERIOD_MS);
@@ -440,6 +469,14 @@ static void init_sntp(void) {
 
 void app_main(void) {
   ESP_ERROR_CHECK(nvs_flash_init());
+
+  s_latest_jpg = (uint8_t *)heap_caps_malloc(256 * 1024, MALLOC_CAP_SPIRAM);
+
+  if (!s_latest_jpg) {
+    ESP_LOGE("APP", "Failed to allocate memory for latest jpg");
+    return;
+  }
+
   ESP_ERROR_CHECK(wifi_connect_blocking());
   init_sntp();
 
@@ -455,7 +492,7 @@ void app_main(void) {
   ESP_ERROR_CHECK(init_camera());
 
   xTaskCreate(time_keeper_task, "time_keeper", 4096, NULL, 3, NULL);
-  xTaskCreatePinnedToCore(capture_refresh_task, "cap_refresh", 4096, NULL, 5, NULL, 1);
+  xTaskCreate(capture_refresh_task, "cap_refresh", 4096, NULL, 5, NULL);
 
   if (!start_webserver()) {
     ESP_LOGE("APP", "Failed to start web server");

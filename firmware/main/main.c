@@ -1,16 +1,15 @@
-#include <stdlib.h>
-
-#include "esp_camera.h"
-#include "esp_event.h"
-#include "esp_http_server.h"
 #include "esp_log.h"
-#include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_camera.h"
+#include "esp_netif.h"
 #include "esp_sntp.h"
+#include "esp_http_server.h"
 #include "nvs_flash.h"
 
 #define START_HOUR 7
 #define END_HOUR 19
+#define BIT_WORKING_HOURS (1 << 0)
 
 static esp_ip4_addr_t ipaddr;
 static httpd_handle_t s_httpd = NULL;
@@ -21,17 +20,40 @@ static size_t s_latest_jpg_len = 0;
 static SemaphoreHandle_t s_latest_mux = NULL;
 static SemaphoreHandle_t s_cam_mux    = NULL;
 
-static bool is_working_hours(void) {
-  time_t now;
-  struct tm timeinfo;
-  time(&now);
-  localtime_r(&now, &timeinfo);
+static EventGroupHandle_t s_evt_group;
 
-  if (timeinfo.tm_year < (2000 - 1900) || (timeinfo.tm_hour >= START_HOUR && timeinfo.tm_hour < END_HOUR)) {
-    return true;
+static void time_keeper_task(void *arg) {
+  while (1) {
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    localtime_r(&now, &timeinfo);
+
+    bool is_time_synced = (timeinfo.tm_year > (2000 - 1900));
+    bool is_working     = false;
+
+    if (is_time_synced) {
+      if (timeinfo.tm_hour >= START_HOUR && timeinfo.tm_hour < END_HOUR) {
+        is_working = true;
+      }
+    } else {
+      is_working = true;
+    }
+
+    if (is_working) {
+      if (!(xEventGroupGetBits(s_evt_group) & BIT_WORKING_HOURS)) {
+        ESP_LOGI("TIME", "Working hours started (Bit SET)");
+        xEventGroupSetBits(s_evt_group, BIT_WORKING_HOURS);
+      }
+    } else {
+      if (xEventGroupGetBits(s_evt_group) & BIT_WORKING_HOURS) {
+        ESP_LOGI("TIME", "Working hours ended (Bit CLEARED)");
+        xEventGroupClearBits(s_evt_group, BIT_WORKING_HOURS);
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(60 * 1000));
   }
-
-  return false;
 }
 
 static void httpd_wake(void *arg) {}
@@ -44,22 +66,16 @@ static esp_err_t update_latest_capture(void) {
 
   sensor_t *s = esp_camera_sensor_get();
   s->set_framesize(s, FRAMESIZE_QXGA);
-
-  fb = esp_camera_fb_get();
-
-  if (fb) {
-    esp_camera_fb_return(fb);
-    fb = NULL;
-  }
+  vTaskDelay(pdMS_TO_TICKS(100));
 
   for (int i = 0; i < 3; i++) {
     fb = esp_camera_fb_get();
 
-    if (!fb || (fb->width == 2048 && fb->height == 1536)) {
-      break;
+    if (!fb) {
+      continue;
     }
 
-    if (fb->format == PIXFORMAT_JPEG && fb->len >= 2 && fb->buf[0] == 0xFF && fb->buf[1] == 0xD8) {
+    if (fb->width == 2048 && fb->height == 1536) {
       break;
     }
 
@@ -104,27 +120,19 @@ static esp_err_t update_latest_capture(void) {
 static void capture_refresh_task(void *arg) {
   const TickType_t period = pdMS_TO_TICKS(60 * 1000);
 
-  for (int i = 0; i < 10; i++) {
-    if (update_latest_capture() == ESP_OK) {
-      break;
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(200));
-  }
-
   while (1) {
-    if (is_working_hours()) {
+    EventBits_t bits = xEventGroupWaitBits(s_evt_group, BIT_WORKING_HOURS, pdFALSE, pdTRUE, portMAX_DELAY);
+
+    if (bits & BIT_WORKING_HOURS) {
       update_latest_capture();
       vTaskDelay(period);
-    } else {
-      ESP_LOGI("APP", "Sleeping outside working hours...");
-      vTaskDelay(pdMS_TO_TICKS(60 * 1000));
     }
   }
 }
 
 static esp_err_t capture_handler(httpd_req_t *req) {
-  if (!is_working_hours()) {
+  EventBits_t bits = xEventGroupGetBits(s_evt_group);
+  if (!(bits & BIT_WORKING_HOURS)) {
     httpd_resp_set_status(req, "403 Forbidden");
     return httpd_resp_sendstr(req, "Camera is sleeping (07:00 - 19:00 only)");
   }
@@ -134,27 +142,15 @@ static esp_err_t capture_handler(httpd_req_t *req) {
   httpd_resp_set_hdr(req, "Pragma", "no-cache");
 
   xSemaphoreTake(s_latest_mux, portMAX_DELAY);
-  size_t len = s_latest_jpg_len;
 
-  if (!s_latest_jpg || len == 0) {
+  if (!s_latest_jpg) {
     xSemaphoreGive(s_latest_mux);
     httpd_resp_set_status(req, "503 Service Unavailable");
-    return httpd_resp_sendstr(req, "No capture yet");
+    return httpd_resp_sendstr(req, "Initializing...");
   }
 
-  uint8_t *tmp = (uint8_t *)malloc(len);
-
-  if (!tmp) {
-    xSemaphoreGive(s_latest_mux);
-    httpd_resp_set_status(req, "503 Service Unavailable");
-    return httpd_resp_sendstr(req, "No mem");
-  }
-
-  memcpy(tmp, s_latest_jpg, len);
+  esp_err_t r = httpd_resp_send(req, (const char *)s_latest_jpg, s_latest_jpg_len);
   xSemaphoreGive(s_latest_mux);
-
-  esp_err_t r = httpd_resp_send(req, (const char *)tmp, len);
-  free(tmp);
   return r;
 }
 
@@ -166,7 +162,7 @@ static void stream_task(void *arg) {
 
   httpd_req_t *req = (httpd_req_t *)arg;
 
-  if (!is_working_hours()) {
+  if (!(xEventGroupGetBits(s_evt_group) & BIT_WORKING_HOURS)) {
     httpd_resp_set_status(req, "403 Forbidden");
     httpd_resp_sendstr(req, "Camera is sleeping (07:00 - 19:00 only)");
     httpd_req_async_handler_complete(req);
@@ -190,7 +186,7 @@ static void stream_task(void *arg) {
   char hdr[64];
 
   while (1) {
-    if (!is_working_hours()) {
+    if (!(xEventGroupGetBits(s_evt_group) & BIT_WORKING_HOURS)) {
       break;
     }
 
@@ -407,6 +403,7 @@ static esp_err_t wifi_connect_blocking(void) {
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
   ESP_ERROR_CHECK(esp_wifi_start());
+  ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
   ESP_ERROR_CHECK(esp_wifi_connect());
 
   ESP_LOGI("Wi-Fi", "Connecting Wi-Fi: %s", WIFI_SSID);
@@ -446,6 +443,7 @@ void app_main(void) {
   ESP_ERROR_CHECK(wifi_connect_blocking());
   init_sntp();
 
+  s_evt_group  = xEventGroupCreate();
   s_latest_mux = xSemaphoreCreateMutex();
   s_cam_mux    = xSemaphoreCreateMutex();
 
@@ -456,6 +454,7 @@ void app_main(void) {
 
   ESP_ERROR_CHECK(init_camera());
 
+  xTaskCreate(time_keeper_task, "time_keeper", 4096, NULL, 3, NULL);
   xTaskCreatePinnedToCore(capture_refresh_task, "cap_refresh", 4096, NULL, 5, NULL, 1);
 
   if (!start_webserver()) {

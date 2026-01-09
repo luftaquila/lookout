@@ -396,6 +396,14 @@ static esp_err_t init_camera(void) {
   esp_err_t err = esp_camera_init(&c);
   sensor_t *s   = esp_camera_sensor_get();
   s->set_vflip(s, 1);
+  s->set_lenc(s, 1);
+  s->set_dcw(s, 1);
+  s->set_exposure_ctrl(s, 1);
+  s->set_ae_level(s, -2);
+  s->set_aec2(s, 1);
+  s->set_aec_value(s, 1200);
+  s->set_awb_gain(s, 0);
+  s->set_brightness(s, 1);
 
   if (err != ESP_OK) {
     ESP_LOGE("CAM", "esp_camera_init failed: 0x%x", err);

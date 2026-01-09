@@ -1,15 +1,21 @@
 import os
 import requests
+
+from dotenv import load_dotenv
 from io import BytesIO
 from datetime import datetime
-from PIL import Image, ImageDraw
+
 import numpy as np
 import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw
+
 from sam3.model_builder import build_sam3_image_model
 from sam3.model.sam3_image_processor import Sam3Processor
 
-camera = "http://10.24.59.100/capture"
-webhook = "https://example.com/webhook"
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
+
+load_dotenv()
 
 data_dir = "./data"
 os.makedirs(os.path.join(data_dir, "images"), exist_ok=True)
@@ -39,11 +45,24 @@ def show_mask(mask, ax):
     ax.imshow(mask_image)
 
 
-def send_webhook(car_count, image_path, timestamp):
-    print("Sending webhook...")
+def send_message(car_count, image_path, timestamp):
+    client = WebClient(token=os.getenv("token"))
+
+    try:
+        client.files_upload_v2(
+            channel=os.getenv("channel"),
+            file=image_path,
+            initial_comment=f"{timestamp} - 차량 {car_count} / 33 대 ({car_count / 33 * 100:.1f}%)",
+        )
+
+    # ignore all exceptions
+    except Exception as e:
+        print(f"Error sending message to Slack: {e}")
 
 
 def detect():
+    camera = os.getenv("camera")
+
     now = datetime.now()
     timestamp_log = now.strftime("%Y-%m-%d %H:%M")
     timestamp_file = now.strftime("%Y-%m-%d-%H-%M")
@@ -92,7 +111,7 @@ def detect():
         f.write(f"{timestamp_log} : {car_count}\n")
 
     print(f"result: {car_count} ({save_path})")
-    send_webhook(car_count, save_path, timestamp_log)
+    send_message(car_count, save_path, timestamp_log)
 
 
 if __name__ == "__main__":

@@ -96,6 +96,10 @@ static esp_err_t update_latest_capture(void) {
   }
 
   if (!fb) {
+    s->set_framesize(s, FRAMESIZE_SXGA);
+
+    xSemaphoreGive(s_cam_mux);
+    xEventGroupClearBits(s_evt_group, BIT_CAPTURE_BUSY);
     return ESP_FAIL;
   }
 
@@ -124,7 +128,7 @@ static void capture_refresh_task(void *arg) {
 
     if (bits & BIT_WORKING_HOURS) {
       update_latest_capture();
-      vTaskDelay(pdMS_TO_TICKS(60 * 1000) );
+      vTaskDelay(pdMS_TO_TICKS(60 * 1000));
     }
   }
 }

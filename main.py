@@ -1,29 +1,18 @@
 import os
-import requests
-
-from dotenv import load_dotenv
-from io import BytesIO
 from datetime import datetime
+from io import BytesIO
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+import requests
+from dotenv import load_dotenv
 from PIL import Image, ImageDraw
-
-from sam3.model_builder import build_sam3_image_model
-from sam3.model.sam3_image_processor import Sam3Processor
-
 from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
 
 load_dotenv()
 
 data_dir = "./data"
 os.makedirs(os.path.join(data_dir, "images"), exist_ok=True)
-
-model = build_sam3_image_model(device="cpu")
-processor = Sam3Processor(model, device="cpu")
-
-roi_points = [(0, 1536), (59, 524), (458, 283), (1690, 410), (1999, 1141), (2048, 1536)]
 
 
 def apply_roi_mask(image, points):
@@ -76,10 +65,25 @@ def detect():
         return
 
     width, height = original_image.size
+    input_roi_image = apply_roi_mask(
+        original_image,
+        [
+            (0, 1536),
+            (94, 489),
+            (406, 179),
+            (1727, 168),
+            (2048, 908),
+            (2048, 1536),
+        ],
+    )
 
-    input_roi_image = apply_roi_mask(original_image, roi_points)
+    from sam3.model.sam3_image_processor import Sam3Processor
+    from sam3.model_builder import build_sam3_image_model
+
+    processor = Sam3Processor(build_sam3_image_model(device="cpu"), device="cpu")
     inference_state = processor.set_image(input_roi_image)
     output = processor.set_text_prompt(state=inference_state, prompt="Car")
+
     masks = output["masks"]
     np_masks = masks.cpu().numpy()
 

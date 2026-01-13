@@ -418,11 +418,37 @@ static esp_err_t init_camera(void) {
 
 static bool s_got_ip = false;
 
-static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data) {
-  ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
-  ipaddr               = e->ip_info.ip;
-  s_got_ip             = true;
-  ESP_LOGI("Wi-Fi", "Got IP: " IPSTR, IP2STR(&ipaddr));
+static void wifi_watchdog_task(void *arg) {
+  int disconnect_minutes = 0;
+
+  while (1) {
+    vTaskDelay(pdMS_TO_TICKS(60 * 1000));
+
+    if (!s_got_ip) {
+      disconnect_minutes++;
+      ESP_LOGE("WATCHDOG", "Wi-Fi down for %d min", disconnect_minutes);
+
+      if (disconnect_minutes >= 10) {
+        ESP_LOGE("WATCHDOG", "Unrecoverable Wi-Fi detected. Restarting...");
+        esp_restart();
+      }
+    } else {
+      disconnect_minutes = 0;
+    }
+  }
+}
+
+static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
+  if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+    ESP_LOGW("Wi-Fi", "disconnected. reconnecting...");
+    s_got_ip = false;
+    esp_wifi_connect();
+  } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+    ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
+    ipaddr               = e->ip_info.ip;
+    s_got_ip             = true;
+    ESP_LOGI("Wi-Fi", "IP: " IPSTR, IP2STR(&ipaddr));
+  }
 }
 
 static esp_err_t wifi_connect_blocking(void) {
@@ -433,7 +459,8 @@ static esp_err_t wifi_connect_blocking(void) {
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-  ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_got_ip, NULL));
+  ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, NULL));
+  ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_wifi_event, NULL));
 
   wifi_config_t wc = { 0 };
   strncpy((char *)wc.sta.ssid, WIFI_SSID, sizeof(wc.sta.ssid));
@@ -505,6 +532,7 @@ void app_main(void) {
 
   xTaskCreate(time_keeper_task, "time_keeper", 4096, NULL, 3, NULL);
   xTaskCreate(capture_refresh_task, "cap_refresh", 4096, NULL, 5, NULL);
+  xTaskCreate(wifi_watchdog_task, "wifi_wd", 4096, NULL, 1, NULL);
 
   if (!start_webserver()) {
     ESP_LOGE("APP", "Failed to start web server");

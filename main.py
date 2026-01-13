@@ -65,17 +65,15 @@ def detect():
         return
 
     width, height = original_image.size
-    input_roi_image = apply_roi_mask(
-        original_image,
-        [
-            (0, 1536),
-            (94, 489),
-            (406, 179),
-            (1727, 168),
-            (2048, 908),
-            (2048, 1536),
-        ],
-    )
+    roi_points = [
+        (0, 1536),
+        (116, 548),
+        (456, 223),
+        (1714, 201),
+        (2048, 925),
+        (2048, 1536),
+    ]
+    input_roi_image = apply_roi_mask(original_image, roi_points)
 
     from sam3.model.sam3_image_processor import Sam3Processor
     from sam3.model_builder import build_sam3_image_model
@@ -99,10 +97,40 @@ def detect():
     poly_x, poly_y = zip(*(roi_points + [roi_points[0]]))
     plt.plot(poly_x, poly_y, "r-", linewidth=2, label="ROI")
 
-    for mask in np_masks:
+    # for mask in np_masks:
+    #     if mask.ndim == 3:
+    #         mask = mask[0]
+    #     show_mask(mask, ax)
+
+    for i, mask in enumerate(np_masks):
         if mask.ndim == 3:
             mask = mask[0]
         show_mask(mask, ax)
+
+        y_indices, x_indices = np.where(mask)
+
+        if len(x_indices) > 0 and len(y_indices) > 0:
+            center_x = np.mean(x_indices)
+            center_y = np.mean(y_indices)
+
+            ax.text(
+                center_x,
+                center_y,
+                str(i + 1),
+                color="white",
+                fontsize=12,
+                fontweight="bold",
+                ha="center",
+                va="center",
+                bbox=dict(
+                    facecolor="black",
+                    alpha=0.5,
+                    edgecolor="none",
+                    boxstyle="round,pad=0.2",
+                ),
+            )
+        else:
+            print(f"Warning: Empty mask for car {i + 1}, skipping annotation.")
 
     plt.axis("off")
 

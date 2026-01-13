@@ -40,7 +40,7 @@ def send_message(car_count, image_path, timestamp):
     try:
         client.files_upload_v2(
             channel=os.getenv("channel"),
-            file=image_path,
+            file_uploads=image_path,
             initial_comment=f"{timestamp} - 차량 {car_count} / 33 대 ({car_count / 33 * 100:.1f}%)",
         )
 
@@ -67,10 +67,10 @@ def detect():
     width, height = original_image.size
     roi_points = [
         (0, 1536),
-        (116, 548),
-        (456, 223),
-        (1714, 201),
-        (2048, 925),
+        (15, 430),
+        (407, 138),
+        (1672, 190),
+        (1986, 925),
         (2048, 1536),
     ]
     input_roi_image = apply_roi_mask(original_image, roi_points)
@@ -96,11 +96,6 @@ def detect():
 
     poly_x, poly_y = zip(*(roi_points + [roi_points[0]]))
     plt.plot(poly_x, poly_y, "r-", linewidth=2, label="ROI")
-
-    # for mask in np_masks:
-    #     if mask.ndim == 3:
-    #         mask = mask[0]
-    #     show_mask(mask, ax)
 
     for i, mask in enumerate(np_masks):
         if mask.ndim == 3:
@@ -138,12 +133,15 @@ def detect():
     plt.savefig(save_path, bbox_inches="tight", pad_inches=0, dpi=dpi)
     plt.close()
 
+    original_save_path = os.path.join(data_dir, "images", f"{timestamp_file}-original.jpg")
+    original_image.save(original_save_path)
+
     log_file_path = os.path.join(data_dir, "log.txt")
     with open(log_file_path, "a", encoding="utf-8") as f:
         f.write(f"{timestamp_log} : {car_count}\n")
 
     print(f"result: {car_count} ({save_path})")
-    send_message(car_count, save_path, timestamp_log)
+    send_message(car_count, [{"file": save_path}, {"file": original_save_path}], timestamp_log)
 
 
 if __name__ == "__main__":

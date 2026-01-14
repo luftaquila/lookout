@@ -15,13 +15,92 @@
 static esp_ip4_addr_t ipaddr;
 static httpd_handle_t s_httpd = NULL;
 
+static bool s_got_ip = false;
+
 static uint8_t *s_latest_jpg   = NULL;
 static size_t s_latest_jpg_len = 0;
 
 static SemaphoreHandle_t s_latest_mux = NULL;
 static SemaphoreHandle_t s_cam_mux    = NULL;
+static int s_camera_access            = 0;
 
 static EventGroupHandle_t s_evt_group;
+
+static esp_err_t init_camera(void) {
+  camera_config_t c = {
+    .pin_pwdn     = 32,
+    .pin_reset    = -1,
+    .pin_xclk     = 0,
+    .pin_sccb_sda = 26,
+    .pin_sccb_scl = 27,
+
+    .pin_d7    = 35,
+    .pin_d6    = 34,
+    .pin_d5    = 39,
+    .pin_d4    = 36,
+    .pin_d3    = 21,
+    .pin_d2    = 19,
+    .pin_d1    = 18,
+    .pin_d0    = 5,
+    .pin_vsync = 25,
+    .pin_href  = 23,
+    .pin_pclk  = 22,
+
+    .xclk_freq_hz = 8000000,
+    .ledc_timer   = LEDC_TIMER_0,
+    .ledc_channel = LEDC_CHANNEL_0,
+
+    .pixel_format = PIXFORMAT_JPEG,
+    .frame_size   = FRAMESIZE_SXGA,
+    .jpeg_quality = 12,
+    .fb_count     = 2,
+    .grab_mode    = CAMERA_GRAB_LATEST,
+  };
+
+  esp_err_t err = esp_camera_init(&c);
+  sensor_t *s   = esp_camera_sensor_get();
+  s->set_vflip(s, 1);
+  s->set_lenc(s, 1);
+  s->set_dcw(s, 1);
+  s->set_exposure_ctrl(s, 1);
+  s->set_ae_level(s, -2);
+  s->set_aec2(s, 1);
+  s->set_aec_value(s, 1200);
+  s->set_awb_gain(s, 0);
+  s->set_brightness(s, 1);
+
+  if (err != ESP_OK) {
+    ESP_LOGE("CAM", "esp_camera_init failed: 0x%x", err);
+  }
+
+  return err;
+}
+
+static void power_camera(bool on) {
+  xSemaphoreTake(s_cam_mux, portMAX_DELAY);
+  sensor_t *s = esp_camera_sensor_get();
+
+  if (on) {
+    if (s_camera_access == 0) {
+      s->set_reg(s, 0x3008, 0xFF, 0x02);
+      vTaskDelay(pdMS_TO_TICKS(100));
+      ESP_LOGI("CAM", "ON");
+    }
+
+    s_camera_access++;
+  } else {
+    if (s_camera_access > 0) {
+      s_camera_access--;
+
+      if (s_camera_access == 0) {
+        s->set_reg(s, 0x3008, 0xFF, 0x42);
+        ESP_LOGI("CAM", "OFF");
+      }
+    }
+  }
+
+  xSemaphoreGive(s_cam_mux);
+}
 
 static void time_keeper_task(void *arg) {
   while (1) {
@@ -62,19 +141,21 @@ static void httpd_wake(void *arg) {}
 static esp_err_t update_latest_capture(void) {
   camera_fb_t *fb = NULL;
 
+  power_camera(true);
+
   xEventGroupSetBits(s_evt_group, BIT_CAPTURE_BUSY);
   xSemaphoreTake(s_cam_mux, portMAX_DELAY);
 
   sensor_t *s = esp_camera_sensor_get();
   s->set_framesize(s, FRAMESIZE_QXGA);
 
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 5; i++) {
     fb = esp_camera_fb_get();
     if (fb) {
       esp_camera_fb_return(fb);
       fb = NULL;
     }
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 
   for (int i = 0; i < 20; i++) {
@@ -118,6 +199,8 @@ static esp_err_t update_latest_capture(void) {
 
   xSemaphoreGive(s_cam_mux);
   xEventGroupClearBits(s_evt_group, BIT_CAPTURE_BUSY);
+
+  power_camera(false);
 
   return ESP_OK;
 }
@@ -206,6 +289,7 @@ static void stream_task(void *arg) {
   }
 
   char hdr[64];
+  power_camera(true);
 
   while (1) {
     if (!(xEventGroupGetBits(s_evt_group) & BIT_WORKING_HOURS)) {
@@ -268,6 +352,8 @@ static void stream_task(void *arg) {
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 
+  power_camera(false);
+
   httpd_resp_send_chunk(req, NULL, 0);
   httpd_req_async_handler_complete(req);
 
@@ -287,6 +373,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   }
 
   BaseType_t ok = xTaskCreate(stream_task, "stream", 8192, (void *)async_req, 5, NULL);
+
   if (ok != pdPASS) {
     httpd_req_async_handler_complete(async_req);
 
@@ -365,58 +452,6 @@ static httpd_handle_t start_webserver(void) {
   ESP_LOGI("HTTP", "capture: http://" IPSTR "/capture", IP2STR(&ipaddr));
   return server;
 }
-
-static esp_err_t init_camera(void) {
-  camera_config_t c = {
-    .pin_pwdn     = 32,
-    .pin_reset    = -1,
-    .pin_xclk     = 0,
-    .pin_sccb_sda = 26,
-    .pin_sccb_scl = 27,
-
-    .pin_d7    = 35,
-    .pin_d6    = 34,
-    .pin_d5    = 39,
-    .pin_d4    = 36,
-    .pin_d3    = 21,
-    .pin_d2    = 19,
-    .pin_d1    = 18,
-    .pin_d0    = 5,
-    .pin_vsync = 25,
-    .pin_href  = 23,
-    .pin_pclk  = 22,
-
-    .xclk_freq_hz = 8000000,
-    .ledc_timer   = LEDC_TIMER_0,
-    .ledc_channel = LEDC_CHANNEL_0,
-
-    .pixel_format = PIXFORMAT_JPEG,
-    .frame_size   = FRAMESIZE_SXGA,
-    .jpeg_quality = 12,
-    .fb_count     = 2,
-    .grab_mode    = CAMERA_GRAB_LATEST,
-  };
-
-  esp_err_t err = esp_camera_init(&c);
-  sensor_t *s   = esp_camera_sensor_get();
-  s->set_vflip(s, 1);
-  s->set_lenc(s, 1);
-  s->set_dcw(s, 1);
-  s->set_exposure_ctrl(s, 1);
-  s->set_ae_level(s, -2);
-  s->set_aec2(s, 1);
-  s->set_aec_value(s, 1200);
-  s->set_awb_gain(s, 0);
-  s->set_brightness(s, 1);
-
-  if (err != ESP_OK) {
-    ESP_LOGE("CAM", "esp_camera_init failed: 0x%x", err);
-  }
-
-  return err;
-}
-
-static bool s_got_ip = false;
 
 static void wifi_watchdog_task(void *arg) {
   int disconnect_minutes = 0;

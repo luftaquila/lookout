@@ -39,7 +39,7 @@ def generate_dashboard(input_file_path, output_html_path="report.html"):
         return
 
     time_intervals = []
-    for h in range(5, 21):
+    for h in range(6, 20):
         time_intervals.append(f"{h:02d}:00")
         time_intervals.append(f"{h:02d}:30")
 

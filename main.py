@@ -7,6 +7,7 @@ import numpy as np
 import requests
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw
+from shapely.geometry import box
 from slack_sdk import WebClient
 
 import graph
@@ -15,6 +16,37 @@ load_dotenv()
 
 data_dir = "./data"
 os.makedirs(os.path.join(data_dir, "images"), exist_ok=True)
+
+
+def filter_overlapping_masks(masks, iou_threshold=0.3):
+    if len(masks) == 0:
+        return masks
+
+    areas = [np.sum(m) for m in masks]
+    sorted_indices = np.argsort(areas)[::-1]
+
+    keep_indices = []
+
+    for i in sorted_indices:
+        current_mask = masks[i]
+        is_overlapping = False
+
+        for kept_idx in keep_indices:
+            kept_mask = masks[kept_idx]
+
+            intersection = np.logical_and(current_mask, kept_mask).sum()
+            union = np.logical_or(current_mask, kept_mask).sum()
+
+            iou = intersection / union if union > 0 else 0
+
+            if iou > iou_threshold:
+                is_overlapping = True
+                break
+
+        if not is_overlapping:
+            keep_indices.append(i)
+
+    return masks[keep_indices]
 
 
 def apply_roi_mask(image, points):
@@ -86,6 +118,11 @@ def detect():
 
     masks = output["masks"]
     np_masks = masks.cpu().numpy()
+
+    if np_masks.ndim == 4:
+        np_masks = np_masks.squeeze(1)
+
+    np_masks = filter_overlapping_masks(np_masks, iou_threshold=0.15)
 
     car_count = len(np_masks)
 

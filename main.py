@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 from PIL import Image, ImageDraw
 from slack_sdk import WebClient
 
+import graph
+
 load_dotenv()
 
 data_dir = "./data"
@@ -137,11 +139,13 @@ def detect():
     original_image.save(original_save_path)
 
     log_file_path = os.path.join(data_dir, "log.txt")
+
     with open(log_file_path, "a", encoding="utf-8") as f:
         f.write(f"{timestamp_log} : {car_count}\n")
 
     print(f"result: {car_count} ({save_path})")
     send_message(car_count, [{"file": save_path}, {"file": original_save_path}], timestamp_log)
+    graph.generate_dashboard(log_file_path, "report.html")
 
 
 if __name__ == "__main__":

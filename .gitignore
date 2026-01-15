@@ -1,6 +1,8 @@
+*.html
 *.log
 .env
 data/
+__pycache__/
 
 .cache
 build/

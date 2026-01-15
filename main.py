@@ -7,7 +7,6 @@ import numpy as np
 import requests
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw
-from shapely.geometry import box
 from slack_sdk import WebClient
 
 import graph
@@ -182,7 +181,7 @@ def detect():
 
     print(f"result: {car_count} ({save_path})")
     send_message(car_count, [{"file": save_path}, {"file": original_save_path}], timestamp_log)
-    graph.generate_dashboard(log_file_path, "report.html")
+    graph.generate_dashboard(log_file_path, "data/report.html")
 
 
 if __name__ == "__main__":

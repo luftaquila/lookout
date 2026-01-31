@@ -113,12 +113,12 @@ def detect():
 
     width, height = original_image.size
     roi_points = [
-        (0, 1536),
-        (111, 636),
-        (436, 320),
-        (1681, 241),
-        (2048, 871),
-        (2048, 1536),
+        (0, 1024),
+        (35, 425),
+        (258, 213),
+        (1076, 162),
+        (1278, 500),
+        (1280, 1024),
     ]
     input_roi_image = apply_roi_mask(original_image, roi_points)
 

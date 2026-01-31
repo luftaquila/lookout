@@ -90,9 +90,23 @@ def detect():
     timestamp_file = now.strftime("%Y-%m-%d-%H-%M")
 
     try:
-        response = requests.get(camera, timeout=10)
+        # Grab a single frame from MJPEG stream
+        response = requests.get(camera, stream=True, timeout=10)
         response.raise_for_status()
-        original_image = Image.open(BytesIO(response.content)).convert("RGB")
+
+        bytes_buffer = b""
+        for chunk in response.iter_content(chunk_size=1024):
+            bytes_buffer += chunk
+            start = bytes_buffer.find(b"\xff\xd8")  # JPEG start
+            end = bytes_buffer.find(b"\xff\xd9")    # JPEG end
+            if start != -1 and end != -1 and end > start:
+                jpg_data = bytes_buffer[start : end + 2]
+                original_image = Image.open(BytesIO(jpg_data)).convert("RGB")
+                response.close()
+                break
+        else:
+            print("Error: Could not extract frame from MJPEG stream")
+            return
     except Exception as e:
         print(f"Error fetching image: {e}")
         return
@@ -108,20 +122,32 @@ def detect():
     ]
     input_roi_image = apply_roi_mask(original_image, roi_points)
 
-    from sam3.model.sam3_image_processor import Sam3Processor
-    from sam3.model_builder import build_sam3_image_model
+    from ultralytics.models.sam import SAM3SemanticPredictor
 
-    processor = Sam3Processor(build_sam3_image_model(device="cpu"), device="cpu")
-    inference_state = processor.set_image(input_roi_image)
-    output = processor.set_text_prompt(state=inference_state, prompt="Car")
+    overrides = dict(
+        conf=0.25,
+        task="segment",
+        mode="predict",
+        model="sam3.pt",
+        save=False,
+        device="cpu",
+    )
 
-    masks = output["masks"]
-    np_masks = masks.cpu().numpy()
+    predictor = SAM3SemanticPredictor(overrides=overrides)
+    predictor.set_image(np.array(input_roi_image))
+    results = predictor(text=["Car"])
 
-    if np_masks.ndim == 4:
-        np_masks = np_masks.squeeze(1)
+    if results[0].masks is not None:
+        np_masks = results[0].masks.data.cpu().numpy()
+    else:
+        np_masks = np.array([])
 
-    np_masks = filter_overlapping_masks(np_masks, iou_threshold=0.15)
+    if len(np_masks) > 0:
+        if np_masks.ndim == 4:
+            np_masks = np_masks.squeeze(1)
+        np_masks = filter_overlapping_masks(np_masks, iou_threshold=0.15)
+    else:
+        np_masks = np.array([])
 
     car_count = len(np_masks)
 

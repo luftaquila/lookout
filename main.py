@@ -1,4 +1,5 @@
 import os
+import shutil
 from datetime import datetime
 from io import BytesIO
 
@@ -208,6 +209,23 @@ def detect():
     print(f"result: {car_count} ({save_path})")
     send_message(car_count, [{"file": save_path}, {"file": original_save_path}], timestamp_log)
     graph.generate_dashboard(log_file_path, "data/report.html")
+
+    # Save current car count to data/current
+    current_file_path = os.path.join(data_dir, "current")
+    with open(current_file_path, "w", encoding="utf-8") as f:
+        f.write(str(car_count))
+
+    # Save current image to data/images/current.jpg
+    current_image_path = os.path.join(data_dir, "images", "current.jpg")
+    shutil.copy(save_path, current_image_path)
+
+    # Send webhook notification
+    webhook_url = os.getenv("webhook")
+    if webhook_url:
+        try:
+            requests.post(webhook_url, json={"count": car_count}, timeout=5)
+        except Exception as e:
+            print(f"Error sending webhook: {e}")
 
 
 if __name__ == "__main__":

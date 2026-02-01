@@ -208,7 +208,7 @@ def detect():
 
     print(f"result: {car_count} ({save_path})")
     send_message(car_count, [{"file": save_path}, {"file": original_save_path}], timestamp_log)
-    graph.generate_dashboard(log_file_path, "data/report.html")
+    graph.generate_dashboard(log_file_path, "data/report.html", "data/report.png")
 
     # Save current car count to data/current
     current_file_path = os.path.join(data_dir, "current")

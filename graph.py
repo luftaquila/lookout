@@ -32,7 +32,7 @@ def parse_data_from_file(file_path):
         return pd.DataFrame()
 
 
-def generate_dashboard(input_file_path, output_html_path="report.html"):
+def generate_dashboard(input_file_path, output_html_path="report.html", output_image_path=None):
     df = parse_data_from_file(input_file_path)
 
     if df.empty:
@@ -173,6 +173,10 @@ def generate_dashboard(input_file_path, output_html_path="report.html"):
 
     print(f"File created: {output_html_path}")
 
+    if output_image_path:
+        fig.write_image(output_image_path, width=1200, height=900, scale=2)
+        print(f"Image created: {output_image_path}")
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -183,4 +187,4 @@ if __name__ == "__main__":
     if not os.path.exists(input_filename):
         sys.exit(1)
 
-    generate_dashboard(input_filename, "data/report.html")
+    generate_dashboard(input_filename, "data/report.html", "data/report.png")

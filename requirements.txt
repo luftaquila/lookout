@@ -1,0 +1,12 @@
+matplotlib
+numpy
+requests
+python-dotenv
+Pillow
+slack_sdk
+ultralytics
+torch
+torchvision
+pandas
+plotly
+kaleido
